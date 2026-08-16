@@ -2,6 +2,12 @@ name: Release
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Lint and Test"]
+    types: [completed]
+    branches: [master]
+  schedule:
+    - cron: '0 0 * * *'
 
 permissions:
   contents: write
@@ -9,10 +15,68 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-## Release steps: compute version, build matrix, upload assets, create GitHub release.
+## Release steps: check if a release is needed, compute version, build matrix, upload assets, create GitHub release.
+
 jobs:
+  changed:
+    name: Check if release is needed
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check if release should run
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              echo "Manual release requested."
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_run)
+              if [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
+                echo "Lint and Test passed on master."
+                echo "changed=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "Lint and Test did not succeed; skipping release."
+                echo "changed=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            schedule)
+              latest_commit_ts=$(git log -1 --format=%ct)
+              latest_release_at=$(gh api "/repos/${{ github.repository }}/releases/latest" --jq '.created_at' 2>/dev/null || true)
+
+              if [ -z "$latest_release_at" ]; then
+                echo "No previous release; creating first nightly."
+                echo "changed=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              latest_release_ts=$(date -d "$latest_release_at" +%s)
+
+              if [ "$latest_commit_ts" -gt "$latest_release_ts" ]; then
+                echo "New commits since last release; creating nightly."
+                echo "changed=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "No new commits since last release; skipping nightly."
+                echo "changed=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "Unknown event; skipping release."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
   version:
     name: Compute and commit version
+    needs: changed
+    if: needs.changed.outputs.changed == 'true'
     runs-on: ubuntu-latest
     outputs:
       release_version: ${{ steps.version.outputs.release_version }}
