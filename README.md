@@ -56,22 +56,12 @@ pb update
 
 This fetches the current updater script and re-runs the installer for the `pb` binary that is first on your `PATH`.
 
-## Setup
-
-```bash
-cargo install --path .
-export PEBBLEHOST_API_TOKEN=...
-```
-
 ## Usage
 
 ```bash
-pb account
-pb servers
-pb server SERVER_ID
-pb power SERVER_ID --action start
-pb command SERVER_ID --command "say hello"
-pb --json servers
+pb --help
+pb --version
+pb update
 ```
 
 The API token is read from `PEBBLEHOST_API_TOKEN` by default. Use `--token` to override it, and `--base-url` to point at a different panel.
