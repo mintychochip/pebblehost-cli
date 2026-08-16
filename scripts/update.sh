@@ -58,16 +58,13 @@ prefix="$(dirname "$pb_path")"
 
 echo "updating pb in ${prefix}..."
 
-extra_args=""
-if [ -n "$arg_tag" ]; then
-  extra_args="${extra_args} --tag ${arg_tag}"
-elif [ -n "$arg_version" ]; then
-  extra_args="${extra_args} --version ${arg_version}"
-fi
+set -- --prefix "$prefix" --force
+[ -n "$arg_tag" ] && set -- "$@" --tag "$arg_tag"
+[ -n "$arg_version" ] && set -- "$@" --version "$arg_version"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 installer="${tmpdir}/install.sh"
 curl -fsSL "https://raw.githubusercontent.com/${REPO}/master/scripts/install.sh" --output "$installer" || err "failed to download installer"
-sh "$installer" --prefix "$prefix" --force $extra_args
+sh "$installer" "$@"
