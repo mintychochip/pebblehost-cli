@@ -26,11 +26,11 @@
   Map `uname -s`/`-m` to the five supported Rust targets.
 
 - [x] **Step 2: Resolve release tag**
-  Default to `https://api.github.com/repos/aincraft-org/pebblehost-cli/releases/latest`; parse `tag_name`; strip `v` to get version.
+  Default to `https://api.github.com/repos/mintychochip/pebblehost-cli/releases/latest`; parse `tag_name`; strip `v` to get version.
   Optional `--tag`/`--version` override.
 
 - [x] **Step 3: Download and extract**
-  Construct `https://github.com/aincraft-org/pebblehost-cli/releases/download/${tag}/pebblehost-cli-${version}-${target}.tar.gz`.
+  Construct `https://github.com/mintychochip/pebblehost-cli/releases/download/${tag}/pebblehost-cli-${version}-${target}.tar.gz`.
   Download to a temp directory, extract `pb` (or `pb.exe` on Windows, but script targets POSIX).
 
 - [x] **Step 4: Choose install prefix**

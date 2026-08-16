@@ -538,7 +538,7 @@ fn maybe_show_version_reminder(json: bool, command: &Command) {
 
 async fn update() -> Result<Response, CliError> {
     eprintln!("updating pb...");
-    let script = "set -e; tmp=$(mktemp); curl -fsSL https://raw.githubusercontent.com/aincraft-org/pebblehost-cli/master/scripts/update.sh -o \"$tmp\"; sh \"$tmp\"";
+    let script = "set -e; tmp=$(mktemp); curl -fsSL https://raw.githubusercontent.com/mintychochip/pebblehost-cli/master/scripts/update.sh -o \"$tmp\"; sh \"$tmp\"";
     let status = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(script)

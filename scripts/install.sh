@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="aincraft-org/pebblehost-cli"
+REPO="mintychochip/pebblehost-cli"
 DEFAULT_PREFIX="${HOME}/.local/bin"
 ALT_PREFIX="/usr/local/bin"
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="aincraft-org/pebblehost-cli"
+REPO="mintychochip/pebblehost-cli"
 
 usage() {
   cat <<EOF

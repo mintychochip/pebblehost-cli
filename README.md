@@ -25,7 +25,7 @@ pb api-call POST /api/client/servers/SERVER_ID/command \
 The easiest way to install on Linux, macOS, or WSL is with the one-line installer:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/aincraft-org/pebblehost-cli/master/scripts/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/mintychochip/pebblehost-cli/master/scripts/install.sh | sh
 ```
 
 This detects your OS and architecture, downloads the latest release, and places the `pb` binary in `~/.local/bin` (or `/usr/local/bin` if that is not writable). Make sure the install directory is on your `PATH`.
@@ -33,13 +33,13 @@ This detects your OS and architecture, downloads the latest release, and places 
 For a different install location:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/aincraft-org/pebblehost-cli/master/scripts/install.sh | sh -s -- --prefix /usr/local/bin
+curl -sSL https://raw.githubusercontent.com/mintychochip/pebblehost-cli/master/scripts/install.sh | sh -s -- --prefix /usr/local/bin
 ```
 
 You can also pin a specific release:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/aincraft-org/pebblehost-cli/master/scripts/install.sh | sh -s -- --tag v2026.8.15.3
+curl -sSL https://raw.githubusercontent.com/mintychochip/pebblehost-cli/master/scripts/install.sh | sh -s -- --tag v2026.8.15.3
 ```
 
 > Security note: piping scripts directly from the internet is convenient but risky. If you prefer, download `scripts/install.sh`, review it, and run it locally with `sh scripts/install.sh`.

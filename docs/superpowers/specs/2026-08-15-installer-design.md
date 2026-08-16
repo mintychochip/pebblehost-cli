@@ -17,7 +17,7 @@ POSIX-compatible shell script at `scripts/install.sh`.
   - macOS x86_64 → `x86_64-apple-darwin`
   - macOS arm64 → `aarch64-apple-darwin`
 - Resolve the requested release:
-  - Default: latest GitHub release (`https://api.github.com/repos/aincraft-org/pebblehost-cli/releases/latest`)
+  - Default: latest GitHub release (`https://api.github.com/repos/mintychochip/pebblehost-cli/releases/latest`)
   - Optional `--tag vX.Y.Z.run` or `--version X.Y.Z.run`
 - Download the matching `pebblehost-cli-<version>-<target>.tar.gz` asset.
 - Verify the download succeeded (non-empty, HTTP 200).
@@ -43,13 +43,13 @@ POSIX-compatible shell script at `scripts/install.sh`.
 ## One-line install command
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/aincraft-org/pebblehost-cli/master/scripts/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/mintychochip/pebblehost-cli/master/scripts/install.sh | sh
 ```
 
 With a prefix:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/aincraft-org/pebblehost-cli/master/scripts/install.sh | sh -s -- --prefix /usr/local/bin
+curl -sSL https://raw.githubusercontent.com/mintychochip/pebblehost-cli/master/scripts/install.sh | sh -s -- --prefix /usr/local/bin
 ```
 
 ## README update
