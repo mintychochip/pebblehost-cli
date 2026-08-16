@@ -9,6 +9,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+## Release steps: compute version, build matrix, upload assets, create GitHub release.
 jobs:
   version:
     name: Compute and commit version
