@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a problem with the PebbleHost CLI.
+labels: ["bug"]
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        ⚠️ Do **not** paste your PebbleHost API token. Redact it from any command output you share.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug.
+      placeholder: The `pb api-call` command returned an unexpected 401 error when I called ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Steps that someone else can follow to see the same behavior.
+      placeholder: |
+        1. Run `pb operations`
+        2. Run `pb api-call GET /api/client/servers/.../resources`
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        OS and architecture, `pb --version` output, install method (curl, cargo, etc.), and shell.
+      placeholder: |
+        OS: macOS 14.5 (aarch64)
+        pb version: v2026.8.16.2
+        Installed via: curl installer
+        Shell: zsh
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Relevant command and output
+      description: |
+        Paste the exact `pb` command and any relevant output. Remember to redact your API token.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have searched existing issues and this is not a duplicate.
