@@ -16,6 +16,12 @@ pb operations
 pb api-call GET /api/client/servers/SERVER_ID/resources
 pb api-call POST /api/client/servers/SERVER_ID/command \
   --body '{"command":"say hello"}'
+
+# Upload a local file to a server
+pb file push ./build/libs/myplugin.jar --server SERVER_ID --directory plugins
+
+# Print a remote file's contents
+pb file contents SERVER_ID server.properties
 ```
 
 `api-call` accepts `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`, repeatable `--query KEY=VALUE` parameters, and a raw JSON `--body`. The default request base URL follows the published OpenAPI server, `https://panel.pebblehost.com`; override it with `--base-url`.
