@@ -1,5 +1,10 @@
 # PebbleHost CLI
 
+[![build](https://github.com/mintychochip/pebblehost-cli/actions/workflows/lint.yml/badge.svg)](https://github.com/mintychochip/pebblehost-cli/actions/workflows/lint.yml)
+[![Release](https://img.shields.io/github/v/release/mintychochip/pebblehost-cli?logo=github&label=release)](https://github.com/mintychochip/pebblehost-cli/releases)
+[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/mintychochip/pebblehost-cli/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An unofficial Rust command-line interface for the PebbleHost client API.
 
 > Unofficial project: this CLI is not affiliated with, endorsed by, sponsored by, or otherwise associated with the PebbleHost brand.
