@@ -12,6 +12,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -26,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Check if release should run
         id: check
@@ -72,6 +76,18 @@ jobs:
               echo "changed=false" >> "$GITHUB_OUTPUT"
               ;;
           esac
+
+          # Idempotency guard: if a release tag already covers the current
+          # HEAD (tag points at or descends from HEAD), skip. This makes
+          # serialized/dropped runs harmless: the surviving run releases the
+          # latest master commit, so no commit is lost or released twice.
+          if [ "$(cat "$GITHUB_OUTPUT" | grep -c 'changed=true')" = "1" ]; then
+            latest_tag=$(git tag --sort=-creatordate --list 'v[0-9]*' | head -1 || true)
+            if [ -n "$latest_tag" ] && git merge-base --is-ancestor HEAD "$latest_tag" 2>/dev/null; then
+              echo "HEAD already released as ${latest_tag}; skipping release."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
   version:
     name: Compute and commit version
