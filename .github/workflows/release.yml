@@ -192,7 +192,7 @@ jobs:
           tar -czf "dist/pebblehost-cli-${version}-${target}.tar.gz" -C dist "${exe}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
           path: dist/pebblehost-cli-*
