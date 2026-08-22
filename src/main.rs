@@ -60,7 +60,7 @@ enum Command {
     ApiCall(ApiCallArgs),
     Operations,
     FileSearch(FileSearchArgs),
-    File(FileArgs),
+    File(FileCommand),
     Update,
 }
 
@@ -123,6 +123,29 @@ struct FileSearchArgs {
 struct FileArgs {
     server_id: String,
     path: String,
+}
+#[derive(Subcommand, Debug)]
+enum FileSubcommand {
+    /// Print the contents of a remote file.
+    Contents(FileArgs),
+    /// Upload a local file to the server.
+    Push(FilePushArgs),
+}
+#[derive(Args, Debug)]
+struct FileCommand {
+    #[command(subcommand)]
+    subcommand: FileSubcommand,
+}
+#[derive(Args, Debug)]
+struct FilePushArgs {
+    /// Local path of the file to upload.
+    local: String,
+    /// Server ID to upload to.
+    #[arg(long = "server", value_name = "SERVER_ID")]
+    server_id: String,
+    /// Remote directory to upload into (e.g. "plugins" or "/").
+    #[arg(long, default_value = "/")]
+    directory: String,
 }
 #[derive(Args, Debug)]
 struct ApiCallArgs {
@@ -190,6 +213,61 @@ impl Api {
         Ok(serde_json::from_str(&text)
             .map(Response::Json)
             .unwrap_or_else(|_| Response::Text(text)))
+    }
+
+    async fn push_file(
+        &self,
+        server_id: &str,
+        local: &str,
+        directory: &str,
+    ) -> Result<Response, CliError> {
+        // Step 1: fetch the signed upload URL.
+        let url_resp = self
+            .request(
+                Method::GET,
+                &path_server(server_id, "/files/upload"),
+                &[("directory", directory.to_owned())],
+                None,
+            )
+            .await?;
+        let upload_url = match url_resp {
+            Response::Json(value) => value
+                .get("attributes")
+                .and_then(|a| a.get("url"))
+                .and_then(|u| u.as_str())
+                .ok_or_else(|| {
+                    CliError::Input("upload response missing attributes.url".to_string())
+                })?
+                .to_owned(),
+            _ => return Err(CliError::Input("upload response was not JSON".to_string())),
+        };
+
+        // Step 2: multipart POST the file to the signed URL (unauthenticated hop).
+        let bytes = std::fs::read(local)?;
+        let file_name = std::path::Path::new(local)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("upload")
+            .to_owned();
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
+        let form = reqwest::multipart::Form::new().part("files[]", part);
+        let upload_client = Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("upload client should build");
+        let response = upload_client
+            .post(&upload_url)
+            .multipart(form)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(CliError::Api {
+                status,
+                message: format!("upload to {} failed", upload_url),
+            });
+        }
+        Ok(Response::Json(Value::Null))
     }
 }
 
@@ -382,15 +460,18 @@ async fn execute(api: &Api, command: Command) -> Result<Response, CliError> {
             )
             .await
         }
-        Command::File(a) => {
-            api.request(
-                Method::GET,
-                &path_server(&a.server_id, "/files/contents"),
-                &[("file", a.path)],
-                None,
-            )
-            .await
-        }
+        Command::File(cmd) => match cmd.subcommand {
+            FileSubcommand::Contents(a) => {
+                api.request(
+                    Method::GET,
+                    &path_server(&a.server_id, "/files/contents"),
+                    &[("file", a.path)],
+                    None,
+                )
+                .await
+            }
+            FileSubcommand::Push(a) => api.push_file(&a.server_id, &a.local, &a.directory).await,
+        },
         Command::ApiCall(args) => api_call(api, args).await,
         Command::Operations => operations().await,
         Command::Update => update().await,
@@ -763,9 +844,11 @@ mod tests {
         let cli = cli_with(
             "secret",
             server.uri(),
-            Command::File(FileArgs {
-                server_id: "srv-1".into(),
-                path: "server.properties".into(),
+            Command::File(FileCommand {
+                subcommand: FileSubcommand::Contents(FileArgs {
+                    server_id: "srv-1".into(),
+                    path: "server.properties".into(),
+                }),
             }),
         );
         let resp = run(cli).await.unwrap();
@@ -845,5 +928,39 @@ mod tests {
             }
             _ => panic!("expected JSON operations"),
         }
+    }
+
+    #[tokio::test]
+    async fn file_push_fetches_upload_url_then_posts_multipart() {
+        let server = MockServer::start().await;
+        // Step 1: the API returns a signed upload URL pointing at the mock server.
+        let upload_url = format!("{}/upload-target", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/api/client/servers/srv-1/files/upload"))
+            .and(query_param("directory", "plugins"))
+            .and(header("Authorization", "Bearer secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "attributes": { "url": upload_url }
+            })))
+            .mount(&server)
+            .await;
+        // Step 2: the multipart POST to the signed URL.
+        Mock::given(method("POST"))
+            .and(path("/upload-target"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let api = test_api(&server, "secret");
+        // Write a temp file to upload.
+        let dir = std::env::temp_dir();
+        let local = dir.join("pb-test-upload.jar");
+        std::fs::write(&local, b"fake jar bytes").unwrap();
+        let resp = api
+            .push_file("srv-1", local.to_str().unwrap(), "plugins")
+            .await
+            .unwrap();
+        assert_eq!(resp, Response::Json(Value::Null));
+        std::fs::remove_file(&local).ok();
     }
 }
