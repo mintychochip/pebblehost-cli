@@ -69,6 +69,6 @@ pb --version
 pb update
 ```
 
-The API token is read from `PEBBLEHOST_API_TOKEN` by default. Use `--token` to override it, and `--base-url` to point at a different panel.
+The API key is read from the `PEBBLEHOST_API_KEY` environment variable. Use `--base-url` to point at a different panel.
 
 The implementation follows the published OpenAPI document at https://api.pebblehost.com/api.yaml and uses documented bearer-token authentication.

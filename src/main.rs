@@ -8,7 +8,7 @@ const DEFAULT_BASE_URL: &str = "https://panel.pebblehost.com";
 
 #[derive(Debug, Error)]
 enum CliError {
-    #[error("missing API token: set PEBBLEHOST_API_TOKEN or pass --token")]
+    #[error("missing API key: set PEBBLEHOST_API_KEY")]
     MissingToken,
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
@@ -29,8 +29,6 @@ enum CliError {
     about = "Manage PebbleHost servers from the command line"
 )]
 struct Cli {
-    #[arg(long, env = "PEBBLEHOST_API_TOKEN", hide_env_values = true)]
-    token: Option<String>,
     #[arg(long, env = "PEBBLEHOST_BASE_URL", default_value = DEFAULT_BASE_URL)]
     base_url: String,
     #[arg(long, global = true, help = "Print compact JSON output")]
@@ -429,23 +427,21 @@ async fn search(
 }
 
 async fn run(cli: Cli) -> Result<Response, CliError> {
-    let Cli {
-        token,
-        base_url,
-        command,
-        ..
-    } = cli;
-    if matches!(command, Command::Operations) {
+    if matches!(cli.command, Command::Operations) {
         return operations().await;
     }
-    if matches!(command, Command::Update) {
+    if matches!(cli.command, Command::Update) {
         return update().await;
     }
-    let token = token
-        .as_ref()
-        .filter(|t| !t.trim().is_empty())
+    let token = std::env::var("PEBBLEHOST_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
         .ok_or(CliError::MissingToken)?;
-    execute(&Api::new(base_url, token.to_owned()), command).await
+    run_with_token(cli, token).await
+}
+
+async fn run_with_token(cli: Cli, token: String) -> Result<Response, CliError> {
+    execute(&Api::new(cli.base_url.clone(), token), cli.command).await
 }
 
 fn sort_value(value: Value) -> Value {
@@ -580,9 +576,8 @@ mod tests {
         Api::new(server.uri(), token.to_owned())
     }
 
-    fn cli_with(token: &str, base_url: String, command: Command) -> Cli {
+    fn cli_with(base_url: String, command: Command) -> Cli {
         Cli {
-            token: Some(token.to_owned()),
             base_url,
             json: false,
             command,
@@ -644,14 +639,13 @@ mod tests {
             .mount(&server)
             .await;
         let cli = cli_with(
-            "secret",
             server.uri(),
             Command::Command(CommandArgs {
                 server_id: "srv-1".into(),
                 command: "say hello".into(),
             }),
         );
-        let resp = run(cli).await.unwrap();
+        let resp = run_with_token(cli, "secret".into()).await.unwrap();
         assert_eq!(resp, Response::Json(json!({"ok": true})));
     }
 
@@ -666,14 +660,13 @@ mod tests {
             .mount(&server)
             .await;
         let cli = cli_with(
-            "secret",
             server.uri(),
             Command::Power(PowerArgs {
                 server_id: "srv-1".into(),
                 action: "start".into(),
             }),
         );
-        let resp = run(cli).await.unwrap();
+        let resp = run_with_token(cli, "secret".into()).await.unwrap();
         assert_eq!(resp, Response::Json(Value::Null));
     }
 
@@ -687,13 +680,12 @@ mod tests {
             .mount(&server)
             .await;
         let cli = cli_with(
-            "secret",
             server.uri(),
             Command::Resources(ServerId {
                 server_id: "srv-1".into(),
             }),
         );
-        let resp = run(cli).await.unwrap();
+        let resp = run_with_token(cli, "secret".into()).await.unwrap();
         assert_eq!(resp, Response::Json(json!({"resources": {}})));
     }
 
@@ -711,7 +703,6 @@ mod tests {
             .mount(&server)
             .await;
         let cli = cli_with(
-            "secret",
             server.uri(),
             Command::Plugins(PluginArgs {
                 server_id: "srv-1".into(),
@@ -722,7 +713,7 @@ mod tests {
                 minecraft_version: None,
             }),
         );
-        let resp = run(cli).await.unwrap();
+        let resp = run_with_token(cli, "secret".into()).await.unwrap();
         assert_eq!(resp, Response::Json(json!({"data": []})));
     }
 
@@ -738,7 +729,6 @@ mod tests {
             .mount(&server)
             .await;
         let cli = cli_with(
-            "secret",
             server.uri(),
             Command::FileSearch(FileSearchArgs {
                 server_id: "srv-1".into(),
@@ -746,7 +736,7 @@ mod tests {
                 root: "/plugins".into(),
             }),
         );
-        let resp = run(cli).await.unwrap();
+        let resp = run_with_token(cli, "secret".into()).await.unwrap();
         assert_eq!(resp, Response::Json(json!({"data": []})));
     }
 
@@ -761,27 +751,44 @@ mod tests {
             .mount(&server)
             .await;
         let cli = cli_with(
-            "secret",
             server.uri(),
             Command::File(FileArgs {
                 server_id: "srv-1".into(),
                 path: "server.properties".into(),
             }),
         );
-        let resp = run(cli).await.unwrap();
+        let resp = run_with_token(cli, "secret".into()).await.unwrap();
         assert_eq!(resp, Response::Text("motd=A Minecraft Server\n".into()));
     }
 
     #[tokio::test]
-    async fn run_requires_non_empty_token() {
-        let cli = Cli {
-            token: None,
-            base_url: "http://example.test".into(),
+    async fn run_resolves_api_key_from_environment() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/client"))
+            .and(header("Authorization", "Bearer secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+        let cli_for = || Cli {
+            base_url: server.uri(),
             json: false,
             command: Command::Servers,
         };
-        let err = run(cli).await.unwrap_err();
-        assert!(matches!(err, CliError::MissingToken));
+
+        std::env::set_var("PEBBLEHOST_API_KEY", "secret");
+        assert_eq!(
+            run(cli_for()).await.unwrap(),
+            Response::Json(json!({"data": []}))
+        );
+
+        for key in ["", "   "] {
+            std::env::set_var("PEBBLEHOST_API_KEY", key);
+            assert!(matches!(run(cli_for()).await, Err(CliError::MissingToken)));
+        }
+
+        std::env::remove_var("PEBBLEHOST_API_KEY");
+        assert!(matches!(run(cli_for()).await, Err(CliError::MissingToken)));
     }
 
     #[tokio::test]
@@ -794,12 +801,11 @@ mod tests {
             .mount(&server)
             .await;
         let cli = Cli {
-            token: Some("secret".into()),
             base_url: server.uri(),
             json: true,
             command: Command::Servers,
         };
-        let resp = run(cli).await.unwrap();
+        let resp = run_with_token(cli, "secret".into()).await.unwrap();
         assert_eq!(resp, Response::Json(json!({"z": 1, "a": 2})));
         if let Response::Json(value) = resp {
             let sorted = sort_value(value);
@@ -820,7 +826,6 @@ mod tests {
             .await;
 
         let cli = cli_with(
-            "secret",
             server.uri(),
             Command::ApiCall(ApiCallArgs {
                 method: "POST".into(),
@@ -834,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn operations_returns_bundled_api_operations() {
-        let cli = cli_with("secret", "http://unused".into(), Command::Operations);
+        let cli = cli_with("http://unused".into(), Command::Operations);
         match run(cli).await.unwrap() {
             Response::Json(value) => {
                 let operations = value
