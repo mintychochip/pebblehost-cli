@@ -449,7 +449,7 @@ fn config_root() -> Option<PathBuf> {
         if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
             return Some(PathBuf::from(path));
         }
-        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"));
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
     }
 
     #[cfg(target_os = "macos")]
