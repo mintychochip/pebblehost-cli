@@ -497,6 +497,36 @@ fn validate_credential_metadata(
     Ok(())
 }
 
+fn validate_credential_directory_component(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), CliError> {
+    if metadata.file_type().is_symlink() {
+        return Err(CliError::Credential(format!(
+            "credential directory is a symlink: {}",
+            path.display()
+        )));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(CliError::Credential(format!(
+                "credential directory is a reparse point: {}",
+                path.display()
+            )));
+        }
+    }
+    if !metadata.file_type().is_dir() {
+        return Err(CliError::Credential(format!(
+            "credential directory is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn validate_credential_parent(parent: &Path) -> Result<(), CliError> {
     let mut component_path = PathBuf::new();
     let mut root_path = parent.to_path_buf();
@@ -515,36 +545,32 @@ fn validate_credential_parent(parent: &Path) -> Result<(), CliError> {
             Component::RootDir => component_path = root_path.clone(),
             _ => component_path.push(component.as_os_str()),
         }
-        let metadata = fs::symlink_metadata(&component_path).map_err(|error| {
-            CliError::Credential(format!(
-                "cannot inspect credential directory {}: {error}",
-                component_path.display()
-            ))
-        })?;
-
-        if metadata.file_type().is_symlink() {
-            return Err(CliError::Credential(format!(
-                "credential directory is a symlink: {}",
-                component_path.display()
-            )));
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                return Err(CliError::Credential(format!(
-                    "credential directory is a reparse point: {}",
-                    component_path.display()
-                )));
+        let metadata = match fs::symlink_metadata(&component_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(error) = fs::create_dir(&component_path) {
+                    if error.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(CliError::Credential(format!(
+                            "cannot create credential directory {}: {error}",
+                            component_path.display()
+                        )));
+                    }
+                }
+                fs::symlink_metadata(&component_path).map_err(|error| {
+                    CliError::Credential(format!(
+                        "cannot inspect credential directory {} after creation: {error}",
+                        component_path.display()
+                    ))
+                })?
             }
-        }
-        if !metadata.file_type().is_dir() {
-            return Err(CliError::Credential(format!(
-                "credential directory is not a directory: {}",
-                component_path.display()
-            )));
-        }
+            Err(error) => {
+                return Err(CliError::Credential(format!(
+                    "cannot inspect credential directory {}: {error}",
+                    component_path.display()
+                )))
+            }
+        };
+        validate_credential_directory_component(&component_path, &metadata)?;
     }
     Ok(())
 }
@@ -584,6 +610,35 @@ fn credential_destination_is_absent(
         }),
     }
 }
+#[cfg(windows)]
+fn credential_entry_is_present(path: &Path) -> Result<bool, std::io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn preserve_credential_temporary_after_recovery_failure(
+    temporary_path: &Path,
+    path: &Path,
+) -> bool {
+    let destination = credential_entry_is_present(path);
+    let temporary = credential_entry_is_present(temporary_path);
+    match (destination, temporary) {
+        // A present destination may be the successfully installed
+        // replacement; never remove it, and clean only the separate temp.
+        (Ok(true), _) => false,
+        (Ok(false), Ok(true)) => true,
+        (Ok(false), Ok(false)) => false,
+        // If the destination is not confirmed present and either inspection
+        // is inconclusive, retain the replacement rather than risk deleting
+        // the only copy of the credential.
+        _ => true,
+    }
+}
+
 
 #[cfg(windows)]
 fn recover_credential_replacement(
@@ -665,12 +720,18 @@ fn replace_credential_file(
     {
         // These errors mean ReplaceFileW may have removed or renamed the
         // destination while leaving the replacement at its temporary path.
-        // MoveFileExW is safe here only when the destination is absent: its
-        // flags deliberately omit MOVEFILE_REPLACE_EXISTING.
-        if credential_destination_is_absent(path, true)? {
-            return recover_credential_replacement(temporary_path, path);
-        }
-        return Err(credential_replacement_error(replace_error, false));
+        // MoveFileExW deliberately omits MOVEFILE_REPLACE_EXISTING, so it
+        // can recover the replacement only when the destination is absent.
+        let recovery_error = match recover_credential_replacement(temporary_path, path) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let preserve_temporary =
+            preserve_credential_temporary_after_recovery_failure(temporary_path, path);
+        return Err(CredentialReplacementError {
+            error: recovery_error.error,
+            preserve_temporary,
+        });
     }
 
     if replace_error != ERROR_FILE_NOT_FOUND && replace_error != ERROR_PATH_NOT_FOUND {
@@ -799,9 +860,6 @@ fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
     } else {
         parent
     };
-    fs::create_dir_all(parent).map_err(|error| {
-        CliError::Credential(format!("cannot create credential directory: {error}"))
-    })?;
     validate_credential_parent(parent)?;
     #[cfg(unix)]
     fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
@@ -1255,6 +1313,34 @@ mod tests {
         ));
         assert!(!target.join("api-key").exists());
     }
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_credential_parent_is_rejected_before_creating_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real-parent");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.path().join("credential-parent");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let path = link.join("nested").join("api-key");
+
+        assert!(matches!(
+            save_stored_token(&path, "secret"),
+            Err(CliError::Credential(_))
+        ));
+        assert!(!target.join("nested").exists());
+    }
+
+    #[test]
+    fn missing_credential_parent_is_created_before_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new").join("nested").join("api-key");
+
+        save_stored_token(&path, "secret").unwrap();
+
+        assert_eq!(load_stored_token(&path).unwrap(), Some("secret".into()));
+        assert!(path.parent().unwrap().is_dir());
+    }
+
 
     #[cfg(unix)]
     #[test]
