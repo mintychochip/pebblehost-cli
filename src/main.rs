@@ -3,14 +3,16 @@ use reqwest::{Client, Method, StatusCode};
 use serde_json::{json, Value};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::Command as ProcessCommand;
 use thiserror::Error;
 
 const DEFAULT_BASE_URL: &str = "https://panel.pebblehost.com";
+const API_KEY_PAGE: &str = "https://panel.pebblehost.com/account/api";
 
 #[derive(Debug, Error)]
 enum CliError {
@@ -53,6 +55,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 #[allow(clippy::enum_variant_names)]
 enum Command {
+    Login,
     Account,
     Servers,
     Server(ServerId),
@@ -259,6 +262,7 @@ async fn operations() -> Result<Response, CliError> {
 
 async fn execute(api: &Api, command: Command) -> Result<Response, CliError> {
     match command {
+        Command::Login => unreachable!("login is handled before API-key resolution"),
         Command::Account => {
             api.request(Method::GET, "/api/client/account", &[], None)
                 .await
@@ -666,7 +670,64 @@ fn resolve_token() -> Result<String, CliError> {
     resolve_token_from(None, &path)
 }
 
+fn open_api_key_page() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let status = ProcessCommand::new("xdg-open").arg(API_KEY_PAGE).status()?;
+    #[cfg(target_os = "macos")]
+    let status = ProcessCommand::new("open").arg(API_KEY_PAGE).status()?;
+    #[cfg(target_os = "windows")]
+    let status = ProcessCommand::new("cmd")
+        .args(["/C", "start", "", API_KEY_PAGE])
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("browser launcher returned a non-success status"))
+    }
+}
+
+fn prompt_api_key() -> io::Result<String> {
+    rpassword::prompt_password("API key: ")
+}
+
+async fn login_with<O, P>(
+    base_url: &str,
+    path: &Path,
+    open: O,
+    prompt: P,
+) -> Result<Response, CliError>
+where
+    O: FnOnce() -> io::Result<()>,
+    P: FnOnce() -> io::Result<String>,
+{
+    eprintln!("Open {API_KEY_PAGE} to generate an API key.");
+    if let Err(error) = open() {
+        eprintln!("Could not open the API-key page automatically: {error}");
+    }
+    let token = prompt()?.trim().to_owned();
+    if token.is_empty() {
+        return Err(CliError::Input("API key cannot be empty".into()));
+    }
+
+    let api = Api::new(base_url.to_owned(), token.clone());
+    api.request(Method::GET, "/api/client/account", &[], None)
+        .await?;
+    save_stored_token(path, &token)?;
+
+    Ok(Response::Text("API key saved successfully.".into()))
+}
+
+async fn login(base_url: &str) -> Result<Response, CliError> {
+    let path = credential_path()
+        .ok_or_else(|| CliError::Credential("cannot determine credential path".into()))?;
+    login_with(base_url, &path, open_api_key_page, prompt_api_key).await
+}
+
 async fn run(cli: Cli) -> Result<Response, CliError> {
+    if matches!(cli.command, Command::Login) {
+        return login(&cli.base_url).await;
+    }
     if matches!(cli.command, Command::Operations) {
         return operations().await;
     }
@@ -733,7 +794,7 @@ fn maybe_show_version_reminder(json: bool, command: &Command) {
     if json {
         return;
     }
-    if matches!(command, Command::Update) {
+    if matches!(command, Command::Login | Command::Update) {
         return;
     }
     let Some(path) = version_reminder_path() else {
@@ -940,6 +1001,55 @@ mod tests {
         assert!(before_subcommand.json);
         assert!(after_subcommand.json);
     }
+    #[test]
+    fn login_command_parses_without_credentials() {
+        let cli = Cli::try_parse_from(["pb", "login"]).unwrap();
+        assert!(matches!(cli.command, Command::Login));
+    }
+
+    #[tokio::test]
+    async fn login_validates_then_saves_key_even_when_browser_open_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/client/account"))
+            .and(header("Authorization", "Bearer secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+
+        let response = login_with(
+            &server.uri(),
+            &path,
+            || Err(std::io::Error::other("browser unavailable")),
+            || Ok(" secret ".into()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response, Response::Text("API key saved successfully.".into()));
+        assert_eq!(load_stored_token(&path).unwrap(), Some("secret".into()));
+    }
+
+    #[tokio::test]
+    async fn login_does_not_replace_key_when_validation_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/client/account"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        save_stored_token(&path, "old-secret").unwrap();
+
+        assert!(login_with(&server.uri(), &path, || Ok(()), || Ok("new-secret".into()))
+            .await
+            .is_err());
+        assert_eq!(load_stored_token(&path).unwrap(), Some("old-secret".into()));
+    }
+
 
     #[test]
     fn compact_response_format_is_sorted_single_line_json() {
