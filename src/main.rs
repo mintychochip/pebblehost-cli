@@ -1,6 +1,12 @@
 use clap::{Args, Parser, Subcommand};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{json, Value};
+use std::ffi::OsStr;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -8,8 +14,10 @@ const DEFAULT_BASE_URL: &str = "https://panel.pebblehost.com";
 
 #[derive(Debug, Error)]
 enum CliError {
-    #[error("missing API key: set PEBBLEHOST_API_KEY")]
+    #[error("missing API key: set PEBBLEHOST_API_KEY or run pb login")]
     MissingToken,
+    #[error("credential error: {0}")]
+    Credential(String),
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("PebbleHost API error ({status}): {message}")]
@@ -31,7 +39,12 @@ enum CliError {
 struct Cli {
     #[arg(long, env = "PEBBLEHOST_BASE_URL", default_value = DEFAULT_BASE_URL)]
     base_url: String,
-    #[arg(long, global = true, help = "Print compact JSON output")]
+    #[arg(
+        long,
+        global = true,
+        visible_alias = "verbose",
+        help = "Print compact JSON response payload"
+    )]
     json: bool,
     #[command(subcommand)]
     command: Command,
@@ -426,6 +439,229 @@ async fn search(
     .await
 }
 
+fn config_root() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            return Some(PathBuf::from(path));
+        }
+        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Library").join("Application Support"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return std::env::var_os("APPDATA").map(PathBuf::from);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+    }
+}
+
+fn credential_path() -> Option<PathBuf> {
+    config_root().map(|root| root.join("pebblehost-cli").join("api-key"))
+}
+
+#[cfg(unix)]
+fn validate_credential_metadata(path: &Path, metadata: &std::fs::Metadata) -> Result<(), CliError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(CliError::Credential(format!(
+            "credential file has unsafe permissions: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_credential_metadata(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(), CliError> {
+    Ok(())
+}
+
+fn existing_credential(path: &Path) -> Result<bool, CliError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(CliError::Credential(format!(
+                "cannot inspect credential file: {error}"
+            )))
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        return Err(CliError::Credential(format!(
+            "credential path is a symlink: {}",
+            path.display()
+        )));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(CliError::Credential(format!(
+            "credential path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    validate_credential_metadata(path, &metadata)?;
+    Ok(true)
+}
+
+fn load_stored_token(path: &Path) -> Result<Option<String>, CliError> {
+    if !existing_credential(path)? {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(path)
+        .map_err(|error| CliError::Credential(format!("cannot read credential file: {error}")))?;
+    let token = contents.trim();
+    if token.is_empty() {
+        return Err(CliError::Credential(
+            "credential file contains an empty token".into(),
+        ));
+    }
+    Ok(Some(token.to_owned()))
+}
+
+fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    fs::create_dir_all(parent).map_err(|error| {
+        CliError::Credential(format!("cannot create credential directory: {error}"))
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
+        CliError::Credential(format!("cannot secure credential directory: {error}"))
+    })?;
+
+    existing_credential(path)?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("api-key");
+    let mut temporary = None;
+    for attempt in 0..100u32 {
+        let temporary_path = parent.join(format!(
+            ".{file_name}.tmp-{pid}-{timestamp}-{attempt}"
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temporary_path) {
+            Ok(file) => {
+                temporary = Some((temporary_path, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(CliError::Credential(format!(
+                    "cannot create temporary credential file: {error}"
+                )))
+            }
+        }
+    }
+    let (temporary_path, mut file) = temporary.ok_or_else(|| {
+        CliError::Credential("cannot create a unique temporary credential file".into())
+    })?;
+
+    #[cfg(unix)]
+    if let Err(error) =
+        fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o600))
+    {
+        drop(file);
+        let _ = fs::remove_file(&temporary_path);
+        return Err(CliError::Credential(format!(
+            "cannot secure temporary credential file: {error}"
+        )));
+    }
+
+    let result = (|| -> Result<(), CliError> {
+        file.write_all(token.as_bytes()).map_err(|error| {
+            CliError::Credential(format!("cannot write temporary credential file: {error}"))
+        })?;
+        file.write_all(b"\n").map_err(|error| {
+            CliError::Credential(format!("cannot write temporary credential file: {error}"))
+        })?;
+        file.flush().map_err(|error| {
+            CliError::Credential(format!("cannot flush temporary credential file: {error}"))
+        })?;
+        file.sync_all().map_err(|error| {
+            CliError::Credential(format!("cannot sync temporary credential file: {error}"))
+        })?;
+        drop(file);
+
+        #[cfg(unix)]
+        fs::rename(&temporary_path, path).map_err(|error| {
+            CliError::Credential(format!("cannot replace credential file: {error}"))
+        })?;
+
+        #[cfg(windows)]
+        {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(CliError::Credential(format!(
+                        "cannot replace credential file: {error}"
+                    )))
+                }
+            }
+            fs::rename(&temporary_path, path).map_err(|error| {
+                CliError::Credential(format!("cannot replace credential file: {error}"))
+            })?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+fn resolve_token_from(env_token: Option<&OsStr>, path: &Path) -> Result<String, CliError> {
+    if let Some(env_token) = env_token {
+        let token = env_token.to_str().ok_or_else(|| {
+            CliError::Credential("environment API key is not valid UTF-8".into())
+        })?;
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(CliError::MissingToken);
+        }
+        return Ok(token.to_owned());
+    }
+
+    load_stored_token(path)?.ok_or(CliError::MissingToken)
+}
+
+fn resolve_token() -> Result<String, CliError> {
+    let path = credential_path().ok_or(CliError::MissingToken)?;
+    resolve_token_from(std::env::var_os("PEBBLEHOST_API_KEY").as_deref(), &path)
+}
+
 async fn run(cli: Cli) -> Result<Response, CliError> {
     if matches!(cli.command, Command::Operations) {
         return operations().await;
@@ -433,10 +669,7 @@ async fn run(cli: Cli) -> Result<Response, CliError> {
     if matches!(cli.command, Command::Update) {
         return update().await;
     }
-    let token = std::env::var("PEBBLEHOST_API_KEY")
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .ok_or(CliError::MissingToken)?;
+    let token = resolve_token()?;
     run_with_token(cli, token).await
 }
 
@@ -461,19 +694,22 @@ fn sort_value(value: Value) -> Value {
     }
 }
 
-fn print_response(response: Response, json: bool) {
+fn format_response(response: Response, json: bool) -> String {
     match response {
         Response::Json(value) => {
             let sorted = sort_value(value);
-            let output = if json {
+            if json {
                 sorted.to_string()
             } else {
                 serde_json::to_string_pretty(&sorted).unwrap()
-            };
-            println!("{}", output);
+            }
         }
-        Response::Text(text) => println!("{}", text),
+        Response::Text(text) => text,
     }
+}
+
+fn print_response(response: Response, json: bool) {
+    println!("{}", format_response(response, json));
 }
 
 const VERSION_REMINDER_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -576,12 +812,105 @@ mod tests {
         Api::new(server.uri(), token.to_owned())
     }
 
+    #[test]
+    fn stored_token_round_trips_and_trims_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pebblehost-cli").join("api-key");
+
+        save_stored_token(&path, "secret").unwrap();
+
+        assert_eq!(load_stored_token(&path).unwrap(), Some("secret".into()));
+    }
+
+    #[test]
+    fn nonempty_environment_token_wins_over_stored_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        save_stored_token(&path, "stored").unwrap();
+
+        assert_eq!(
+            resolve_token_from(Some(std::ffi::OsStr::new("environment")), &path).unwrap(),
+            "environment"
+        );
+    }
+
+    #[test]
+    fn explicit_empty_environment_token_does_not_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        save_stored_token(&path, "stored").unwrap();
+
+        assert!(matches!(
+            resolve_token_from(Some(std::ffi::OsStr::new("   ")), &path),
+            Err(CliError::MissingToken)
+        ));
+    }
+
+    #[test]
+    fn absent_environment_token_uses_stored_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        save_stored_token(&path, "stored").unwrap();
+
+        assert_eq!(resolve_token_from(None, &path).unwrap(), "stored");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_credential_paths_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real-key");
+        std::fs::write(&target, "secret\n").unwrap();
+        let link = dir.path().join("api-key");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(matches!(
+            load_stored_token(&link),
+            Err(CliError::Credential(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_token_has_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        save_stored_token(&path, "secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0);
+    }
+
     fn cli_with(base_url: String, command: Command) -> Cli {
         Cli {
             base_url,
             json: false,
             command,
         }
+    }
+    #[test]
+    fn verbose_flag_is_global_alias_for_json_output() {
+        let before_subcommand = Cli::try_parse_from(["pb", "--verbose", "account"]).unwrap();
+        let after_subcommand = Cli::try_parse_from(["pb", "servers", "--verbose"]).unwrap();
+
+        assert!(before_subcommand.json);
+        assert!(after_subcommand.json);
+    }
+
+    #[test]
+    fn compact_response_format_is_sorted_single_line_json() {
+        let output = format_response(Response::Json(json!({"z": 1, "a": 2})), true);
+
+        assert_eq!(output, r#"{"a":2,"z":1}"#);
+    }
+
+    #[test]
+    fn default_response_format_remains_pretty_json() {
+        let output = format_response(Response::Json(json!({"z": 1, "a": 2})), false);
+
+        assert_eq!(output, "{\n  \"a\": 2,\n  \"z\": 1\n}");
     }
 
     #[tokio::test]
@@ -834,7 +1163,10 @@ mod tests {
                 body: Some(r#"{"command":"say hi"}"#.into()),
             }),
         );
-        assert_eq!(run(cli).await.unwrap(), Response::Json(json!({"ok": true})));
+        assert_eq!(
+            run_with_token(cli, "secret".into()).await.unwrap(),
+            Response::Json(json!({"ok": true}))
+        );
     }
 
     #[tokio::test]
