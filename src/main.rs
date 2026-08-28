@@ -712,7 +712,14 @@ where
 
     let api = Api::new(base_url.to_owned(), token.clone());
     api.request(Method::GET, "/api/client/account", &[], None)
-        .await?;
+        .await
+        .map_err(|error| match error {
+            CliError::Api { status, .. } => CliError::Api {
+                status,
+                message: "API key validation failed".into(),
+            },
+            error => error,
+        })?;
     save_stored_token(path, &token)?;
 
     Ok(Response::Text("API key saved successfully.".into()))
@@ -1049,6 +1056,35 @@ mod tests {
             .is_err());
         assert_eq!(load_stored_token(&path).unwrap(), Some("old-secret".into()));
     }
+    #[tokio::test]
+    async fn login_validation_error_does_not_echo_submitted_key() {
+        let server = MockServer::start().await;
+        let submitted_key = "submitted-key-must-not-leak";
+        Mock::given(method("GET"))
+            .and(path("/api/client/account"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string(format!("invalid API key: {submitted_key}")),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        save_stored_token(&path, "old-secret").unwrap();
+
+        let error = login_with(
+            &server.uri(),
+            &path,
+            || Ok(()),
+            || Ok(submitted_key.into()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!error.to_string().contains(submitted_key));
+        assert_eq!(load_stored_token(&path).unwrap(), Some("old-secret".into()));
+    }
+
 
 
     #[test]
