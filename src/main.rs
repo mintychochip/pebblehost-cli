@@ -6,7 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -497,6 +497,208 @@ fn validate_credential_metadata(
     Ok(())
 }
 
+fn validate_credential_parent(parent: &Path) -> Result<(), CliError> {
+    let mut component_path = PathBuf::new();
+    let mut root_path = parent.to_path_buf();
+    while let Some(next) = root_path.parent() {
+        if next == root_path {
+            break;
+        }
+        root_path = next.to_path_buf();
+    }
+    for component in parent.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                component_path = PathBuf::from(prefix.as_os_str());
+                continue;
+            }
+            Component::RootDir => component_path = root_path.clone(),
+            _ => component_path.push(component.as_os_str()),
+        }
+        let metadata = fs::symlink_metadata(&component_path).map_err(|error| {
+            CliError::Credential(format!(
+                "cannot inspect credential directory {}: {error}",
+                component_path.display()
+            ))
+        })?;
+
+        if metadata.file_type().is_symlink() {
+            return Err(CliError::Credential(format!(
+                "credential directory is a symlink: {}",
+                component_path.display()
+            )));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(CliError::Credential(format!(
+                    "credential directory is a reparse point: {}",
+                    component_path.display()
+                )));
+            }
+        }
+        if !metadata.file_type().is_dir() {
+            return Err(CliError::Credential(format!(
+                "credential directory is not a directory: {}",
+                component_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+struct CredentialReplacementError {
+    error: CliError,
+    preserve_temporary: bool,
+}
+
+#[cfg(windows)]
+fn credential_replacement_error(
+    error: u32,
+    preserve_temporary: bool,
+) -> CredentialReplacementError {
+    CredentialReplacementError {
+        error: CliError::Credential(format!(
+            "cannot replace credential file: Windows error {error}"
+        )),
+        preserve_temporary,
+    }
+}
+
+#[cfg(windows)]
+fn credential_destination_is_absent(
+    path: &Path,
+    preserve_temporary_on_error: bool,
+) -> Result<bool, CredentialReplacementError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(CredentialReplacementError {
+            error: CliError::Credential(format!(
+                "cannot inspect credential file after replacement failure: {error}"
+            )),
+            preserve_temporary: preserve_temporary_on_error,
+        }),
+    }
+}
+
+#[cfg(windows)]
+fn recover_credential_replacement(
+    temporary_path: &Path,
+    path: &Path,
+) -> Result<(), CredentialReplacementError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let path_as_wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let destination = path_as_wide(path);
+    let replacement = path_as_wide(temporary_path);
+    let moved = unsafe {
+        MoveFileExW(
+            replacement.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved != 0 {
+        return Ok(());
+    }
+
+    Err(credential_replacement_error(
+        unsafe { GetLastError() },
+        true,
+    ))
+}
+
+#[cfg(windows)]
+fn replace_credential_file(
+    temporary_path: &Path,
+    path: &Path,
+) -> Result<(), CredentialReplacementError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
+        ERROR_UNABLE_TO_MOVE_REPLACEMENT, ERROR_UNABLE_TO_MOVE_REPLACEMENT_2,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH,
+        REPLACEFILE_WRITE_THROUGH,
+    };
+
+    let path_as_wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let destination = path_as_wide(path);
+    let replacement = path_as_wide(temporary_path);
+
+    let replaced = unsafe {
+        ReplaceFileW(
+            destination.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced != 0 {
+        return Ok(());
+    }
+
+    let replace_error = unsafe { GetLastError() };
+    if replace_error == ERROR_UNABLE_TO_MOVE_REPLACEMENT
+        || replace_error == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2
+    {
+        // These errors mean ReplaceFileW may have removed or renamed the
+        // destination while leaving the replacement at its temporary path.
+        // MoveFileExW is safe here only when the destination is absent: its
+        // flags deliberately omit MOVEFILE_REPLACE_EXISTING.
+        if credential_destination_is_absent(path, true)? {
+            return recover_credential_replacement(temporary_path, path);
+        }
+        return Err(credential_replacement_error(replace_error, false));
+    }
+
+    if replace_error != ERROR_FILE_NOT_FOUND && replace_error != ERROR_PATH_NOT_FOUND {
+        return Err(credential_replacement_error(replace_error, false));
+    }
+
+    // ReplaceFileW requires an existing destination. MoveFileExW without
+    // MOVEFILE_REPLACE_EXISTING fills the absent-destination case without
+    // overwriting a destination that appears concurrently.
+    if !credential_destination_is_absent(path, false)? {
+        return Err(credential_replacement_error(replace_error, false));
+    }
+    let moved = unsafe {
+        MoveFileExW(
+            replacement.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved != 0 {
+        return Ok(());
+    }
+
+    let move_error = unsafe { GetLastError() };
+    Err(credential_replacement_error(move_error, false))
+}
+
+
 fn existing_credential(path: &Path) -> Result<bool, CliError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -590,66 +792,6 @@ fn load_stored_token(path: &Path) -> Result<Option<String>, CliError> {
     Ok(Some(token.to_owned()))
 }
 
-#[cfg(windows)]
-fn replace_credential_file(temporary_path: &Path, path: &Path) -> Result<(), CliError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{
-        GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
-    };
-
-    let path_as_wide = |path: &Path| {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>()
-    };
-    let destination = path_as_wide(path);
-    let replacement = path_as_wide(temporary_path);
-
-    let replaced = unsafe {
-        ReplaceFileW(
-            destination.as_ptr(),
-            replacement.as_ptr(),
-            std::ptr::null(),
-            REPLACEFILE_WRITE_THROUGH,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if replaced != 0 {
-        return Ok(());
-    }
-
-    let replace_error = unsafe { GetLastError() };
-    if replace_error != ERROR_FILE_NOT_FOUND && replace_error != ERROR_PATH_NOT_FOUND {
-        return Err(CliError::Credential(format!(
-            "cannot replace credential file: Windows error {replace_error}"
-        )));
-    }
-
-    // ReplaceFileW requires an existing destination. MoveFileExW without
-    // MOVEFILE_REPLACE_EXISTING fills the absent-destination case without
-    // overwriting a destination that appears concurrently.
-    let moved = unsafe {
-        MoveFileExW(
-            replacement.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved != 0 {
-        return Ok(());
-    }
-
-    let move_error = unsafe { GetLastError() };
-    Err(CliError::Credential(format!(
-        "cannot replace credential file: Windows error {move_error}"
-    )))
-}
-
 fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let parent = if parent.as_os_str().is_empty() {
@@ -660,6 +802,7 @@ fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
     fs::create_dir_all(parent).map_err(|error| {
         CliError::Credential(format!("cannot create credential directory: {error}"))
     })?;
+    validate_credential_parent(parent)?;
     #[cfg(unix)]
     fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
         CliError::Credential(format!("cannot secure credential directory: {error}"))
@@ -676,6 +819,8 @@ fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("api-key");
+    #[cfg(windows)]
+    let mut preserve_temporary = false;
     let mut temporary = None;
     for attempt in 0..100u32 {
         let temporary_path = parent.join(format!(".{file_name}.tmp-{pid}-{timestamp}-{attempt}"));
@@ -734,10 +879,17 @@ fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
         })?;
 
         #[cfg(windows)]
-        replace_credential_file(&temporary_path, path)?;
+        if let Err(error) = replace_credential_file(&temporary_path, path) {
+            preserve_temporary = error.preserve_temporary;
+            return Err(error.error);
+        }
         Ok(())
     })();
     if result.is_err() {
+        #[cfg(windows)]
+        if preserve_temporary {
+            return result;
+        }
         let _ = fs::remove_file(&temporary_path);
     }
     result
@@ -1085,6 +1237,23 @@ mod tests {
             load_stored_token(&link),
             Err(CliError::Credential(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_credential_parent_is_rejected_without_writing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real-parent");
+        std::fs::create_dir(&target).unwrap();
+        let link = dir.path().join("credential-parent");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let path = link.join("api-key");
+
+        assert!(matches!(
+            save_stored_token(&path, "secret"),
+            Err(CliError::Credential(_))
+        ));
+        assert!(!target.join("api-key").exists());
     }
 
     #[cfg(unix)]
