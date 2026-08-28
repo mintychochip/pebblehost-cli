@@ -4,11 +4,11 @@ use serde_json::{json, Value};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const DEFAULT_BASE_URL: &str = "https://panel.pebblehost.com";
@@ -454,8 +454,11 @@ fn config_root() -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        return std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join("Library").join("Application Support"));
+        return std::env::var_os("HOME").map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+        });
     }
 
     #[cfg(target_os = "windows")]
@@ -565,9 +568,7 @@ fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
         .unwrap_or("api-key");
     let mut temporary = None;
     for attempt in 0..100u32 {
-        let temporary_path = parent.join(format!(
-            ".{file_name}.tmp-{pid}-{timestamp}-{attempt}"
-        ));
+        let temporary_path = parent.join(format!(".{file_name}.tmp-{pid}-{timestamp}-{attempt}"));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -593,8 +594,7 @@ fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
     })?;
 
     #[cfg(unix)]
-    if let Err(error) =
-        fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o600))
+    if let Err(error) = fs::set_permissions(&temporary_path, std::fs::Permissions::from_mode(0o600))
     {
         drop(file);
         let _ = fs::remove_file(&temporary_path);
@@ -648,9 +648,9 @@ fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
 
 fn resolve_token_from(env_token: Option<&OsStr>, path: &Path) -> Result<String, CliError> {
     if let Some(env_token) = env_token {
-        let token = env_token.to_str().ok_or_else(|| {
-            CliError::Credential("environment API key is not valid UTF-8".into())
-        })?;
+        let token = env_token
+            .to_str()
+            .ok_or_else(|| CliError::Credential("environment API key is not valid UTF-8".into()))?;
         let token = token.trim();
         if token.is_empty() {
             return Err(CliError::MissingToken);
@@ -683,7 +683,9 @@ fn open_api_key_page() -> io::Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::other("browser launcher returned a non-success status"))
+        Err(io::Error::other(
+            "browser launcher returned a non-success status",
+        ))
     }
 }
 
@@ -943,7 +945,6 @@ mod tests {
         assert_eq!(result.unwrap(), "environment");
     }
 
-
     #[test]
     fn explicit_empty_environment_token_does_not_fallback() {
         let dir = tempfile::tempdir().unwrap();
@@ -1035,7 +1036,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(response, Response::Text("API key saved successfully.".into()));
+        assert_eq!(
+            response,
+            Response::Text("API key saved successfully.".into())
+        );
         assert_eq!(load_stored_token(&path).unwrap(), Some("secret".into()));
     }
 
@@ -1051,9 +1055,11 @@ mod tests {
         let path = dir.path().join("api-key");
         save_stored_token(&path, "old-secret").unwrap();
 
-        assert!(login_with(&server.uri(), &path, || Ok(()), || Ok("new-secret".into()))
-            .await
-            .is_err());
+        assert!(
+            login_with(&server.uri(), &path, || Ok(()), || Ok("new-secret".into()))
+                .await
+                .is_err()
+        );
         assert_eq!(load_stored_token(&path).unwrap(), Some("old-secret".into()));
     }
     #[tokio::test]
@@ -1072,20 +1078,13 @@ mod tests {
         let path = dir.path().join("api-key");
         save_stored_token(&path, "old-secret").unwrap();
 
-        let error = login_with(
-            &server.uri(),
-            &path,
-            || Ok(()),
-            || Ok(submitted_key.into()),
-        )
-        .await
-        .unwrap_err();
+        let error = login_with(&server.uri(), &path, || Ok(()), || Ok(submitted_key.into()))
+            .await
+            .unwrap_err();
 
         assert!(!error.to_string().contains(submitted_key));
         assert_eq!(load_stored_token(&path).unwrap(), Some("old-secret".into()));
     }
-
-
 
     #[test]
     fn compact_response_format_is_sorted_single_line_json() {
