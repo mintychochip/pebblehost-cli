@@ -658,8 +658,12 @@ fn resolve_token_from(env_token: Option<&OsStr>, path: &Path) -> Result<String, 
 }
 
 fn resolve_token() -> Result<String, CliError> {
+    if let Some(env_token) = std::env::var_os("PEBBLEHOST_API_KEY") {
+        return resolve_token_from(Some(&env_token), Path::new(""));
+    }
+
     let path = credential_path().ok_or(CliError::MissingToken)?;
-    resolve_token_from(std::env::var_os("PEBBLEHOST_API_KEY").as_deref(), &path)
+    resolve_token_from(None, &path)
 }
 
 async fn run(cli: Cli) -> Result<Response, CliError> {
@@ -833,6 +837,44 @@ mod tests {
             "environment"
         );
     }
+    #[test]
+    fn nonempty_environment_token_resolves_without_config_root() {
+        let home = std::env::var_os("HOME");
+        let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let appdata = std::env::var_os("APPDATA");
+        let previous_token = std::env::var_os("PEBBLEHOST_API_KEY");
+
+        std::env::remove_var("HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("APPDATA");
+        std::env::set_var("PEBBLEHOST_API_KEY", "environment");
+
+        let result = resolve_token();
+
+        if let Some(value) = home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = xdg_config_home {
+            std::env::set_var("XDG_CONFIG_HOME", value);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        if let Some(value) = appdata {
+            std::env::set_var("APPDATA", value);
+        } else {
+            std::env::remove_var("APPDATA");
+        }
+        if let Some(value) = previous_token {
+            std::env::set_var("PEBBLEHOST_API_KEY", value);
+        } else {
+            std::env::remove_var("PEBBLEHOST_API_KEY");
+        }
+
+        assert_eq!(result.unwrap(), "environment");
+    }
+
 
     #[test]
     fn explicit_empty_environment_token_does_not_fallback() {
