@@ -979,7 +979,7 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
     };
 
-    static ENVIRONMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENVIRONMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct EnvironmentRestore {
         values: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -1033,11 +1033,9 @@ mod tests {
             "environment"
         );
     }
-    #[test]
-    fn nonempty_environment_token_resolves_without_config_root() {
-        let _environment_lock = ENVIRONMENT_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+    #[tokio::test]
+    async fn nonempty_environment_token_resolves_without_config_root() {
+        let _environment_lock = ENVIRONMENT_LOCK.lock().await;
         let _environment = EnvironmentRestore::capture(&[
             "HOME",
             "XDG_CONFIG_HOME",
@@ -1404,9 +1402,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_resolves_api_key_from_environment() {
-        let _environment_lock = ENVIRONMENT_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _environment_lock = ENVIRONMENT_LOCK.lock().await;
         let _environment = EnvironmentRestore::capture(&["PEBBLEHOST_API_KEY"]);
         let server = MockServer::start().await;
         Mock::given(method("GET"))
