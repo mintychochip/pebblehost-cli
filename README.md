@@ -1,6 +1,6 @@
 # PebbleHost CLI
 
-[![build](https://github.com/mintychochip/pebblehost-cli/actions/workflows/lint.yml/badge.svg)](https://github.com/mintychochip/pebblehost-cli/actions/workflows/lint.yml)
+[![Build](https://github.com/mintychochip/pebblehost-cli/actions/workflows/build.yml/badge.svg)](https://github.com/mintychochip/pebblehost-cli/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/mintychochip/pebblehost-cli?logo=github&label=release)](https://github.com/mintychochip/pebblehost-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/mintychochip/pebblehost-cli/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -24,6 +24,19 @@ pb api-call POST /api/client/servers/SERVER_ID/command \
 ```
 
 `api-call` accepts `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`, repeatable `--query KEY=VALUE` parameters, and a raw JSON `--body`. The default request base URL follows the published OpenAPI server, `https://panel.pebblehost.com`; override it with `--base-url`.
+
+For a compact, agent-friendly response payload, use the global `--json` flag
+or its `--verbose` alias with any command:
+
+```bash
+pb --verbose account
+pb servers --verbose
+```
+
+Both spellings print successful JSON responses as one sorted line without
+request metadata. The default remains pretty-printed JSON, and diagnostics
+continue to go to stderr.
+Non-JSON text responses, such as `file`, remain raw text.
 
 ## Install
 
@@ -69,6 +82,16 @@ pb --version
 pb update
 ```
 
-The API key is read from the `PEBBLEHOST_API_KEY` environment variable. Use `--base-url` to point at a different panel.
+### Login
+
+Run `pb login` to open `https://panel.pebblehost.com/account/api`. Generate an
+API key there and paste it into the hidden terminal prompt. The validated key
+is stored in the per-user CLI config and is used by authenticated commands.
+`PEBBLEHOST_API_KEY` remains the higher-priority override for scripts and CI.
+
+Browser launch is best-effort. The API key is never printed and is not accepted
+as a command-line argument.
+
+Use `--base-url` to point at a different panel.
 
 The implementation follows the published OpenAPI document at https://api.pebblehost.com/api.yaml and uses documented bearer-token authentication.

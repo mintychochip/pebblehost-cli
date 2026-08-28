@@ -3,7 +3,7 @@ name: Release
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["Lint and Test"]
+    workflows: ["Build"]
     types: [completed]
     branches: [master]
   schedule:
@@ -44,10 +44,10 @@ jobs:
               ;;
             workflow_run)
               if [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
-                echo "Lint and Test passed on master."
+                echo "Build passed on master."
                 echo "changed=true" >> "$GITHUB_OUTPUT"
               else
-                echo "Lint and Test did not succeed; skipping release."
+                echo "Build did not succeed; skipping release."
                 echo "changed=false" >> "$GITHUB_OUTPUT"
               fi
               ;;
