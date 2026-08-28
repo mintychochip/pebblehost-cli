@@ -531,7 +531,7 @@ fn open_credential(path: &Path) -> Result<Option<std::fs::File>, CliError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
 
     #[cfg(windows)]
@@ -1088,6 +1088,23 @@ mod tests {
 
         assert!(matches!(
             load_stored_token(&link),
+            Err(CliError::Credential(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_credential_path_is_rejected_without_a_writer() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        assert!(matches!(
+            load_stored_token(&path),
             Err(CliError::Credential(_))
         ));
     }
