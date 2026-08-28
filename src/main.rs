@@ -559,9 +559,7 @@ fn load_stored_token(path: &Path) -> Result<Option<String>, CliError> {
         CliError::Credential(format!("cannot inspect credential file: {error}"))
     })?;
     if metadata.file_type().is_symlink() {
-        return Err(CliError::Credential(
-            "credential path is a symlink".into(),
-        ));
+        return Err(CliError::Credential("credential path is a symlink".into()));
     }
     if !metadata.file_type().is_file() {
         return Err(CliError::Credential(
@@ -581,9 +579,8 @@ fn load_stored_token(path: &Path) -> Result<Option<String>, CliError> {
     validate_credential_metadata(path, &metadata)?;
 
     let mut contents = String::new();
-    file.read_to_string(&mut contents).map_err(|error| {
-        CliError::Credential(format!("cannot read credential file: {error}"))
-    })?;
+    file.read_to_string(&mut contents)
+        .map_err(|error| CliError::Credential(format!("cannot read credential file: {error}")))?;
     let token = contents.trim();
     if token.is_empty() {
         return Err(CliError::Credential(
