@@ -3,7 +3,7 @@ use reqwest::{Client, Method, StatusCode};
 use serde_json::{json, Value};
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -524,13 +524,66 @@ fn existing_credential(path: &Path) -> Result<bool, CliError> {
     Ok(true)
 }
 
-fn load_stored_token(path: &Path) -> Result<Option<String>, CliError> {
-    if !existing_credential(path)? {
-        return Ok(None);
+fn open_credential(path: &Path) -> Result<Option<std::fs::File>, CliError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
     }
 
-    let contents = fs::read_to_string(path)
-        .map_err(|error| CliError::Credential(format!("cannot read credential file: {error}")))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    match options.open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CliError::Credential(format!(
+            "cannot open credential file: {error}"
+        ))),
+    }
+}
+
+fn load_stored_token(path: &Path) -> Result<Option<String>, CliError> {
+    let Some(mut file) = open_credential(path)? else {
+        return Ok(None);
+    };
+
+    let metadata = file.metadata().map_err(|error| {
+        CliError::Credential(format!("cannot inspect credential file: {error}"))
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(CliError::Credential(
+            "credential path is a symlink".into(),
+        ));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(CliError::Credential(
+            "credential path is not a regular file".into(),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(CliError::Credential(
+                "credential path is a reparse point".into(),
+            ));
+        }
+    }
+    validate_credential_metadata(path, &metadata)?;
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).map_err(|error| {
+        CliError::Credential(format!("cannot read credential file: {error}"))
+    })?;
     let token = contents.trim();
     if token.is_empty() {
         return Err(CliError::Credential(
@@ -538,6 +591,66 @@ fn load_stored_token(path: &Path) -> Result<Option<String>, CliError> {
         ));
     }
     Ok(Some(token.to_owned()))
+}
+
+#[cfg(windows)]
+fn replace_credential_file(temporary_path: &Path, path: &Path) -> Result<(), CliError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
+    };
+
+    let path_as_wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let destination = path_as_wide(path);
+    let replacement = path_as_wide(temporary_path);
+
+    let replaced = unsafe {
+        ReplaceFileW(
+            destination.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced != 0 {
+        return Ok(());
+    }
+
+    let replace_error = unsafe { GetLastError() };
+    if replace_error != ERROR_FILE_NOT_FOUND && replace_error != ERROR_PATH_NOT_FOUND {
+        return Err(CliError::Credential(format!(
+            "cannot replace credential file: Windows error {replace_error}"
+        )));
+    }
+
+    // ReplaceFileW requires an existing destination. MoveFileExW without
+    // MOVEFILE_REPLACE_EXISTING fills the absent-destination case without
+    // overwriting a destination that appears concurrently.
+    let moved = unsafe {
+        MoveFileExW(
+            replacement.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved != 0 {
+        return Ok(());
+    }
+
+    let move_error = unsafe { GetLastError() };
+    Err(CliError::Credential(format!(
+        "cannot replace credential file: Windows error {move_error}"
+    )))
 }
 
 fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
@@ -624,20 +737,7 @@ fn save_stored_token(path: &Path, token: &str) -> Result<(), CliError> {
         })?;
 
         #[cfg(windows)]
-        {
-            match fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(CliError::Credential(format!(
-                        "cannot replace credential file: {error}"
-                    )))
-                }
-            }
-            fs::rename(&temporary_path, path).map_err(|error| {
-                CliError::Credential(format!("cannot replace credential file: {error}"))
-            })?;
-        }
+        replace_credential_file(&temporary_path, path)?;
         Ok(())
     })();
     if result.is_err() {
@@ -882,6 +982,35 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
     };
 
+    static ENVIRONMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvironmentRestore {
+        values: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvironmentRestore {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                values: names
+                    .iter()
+                    .map(|&name| (name, std::env::var_os(name)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvironmentRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.values.drain(..) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+    }
+
     fn test_api(server: &MockServer, token: &str) -> Api {
         Api::new(server.uri(), token.to_owned())
     }
@@ -909,40 +1038,22 @@ mod tests {
     }
     #[test]
     fn nonempty_environment_token_resolves_without_config_root() {
-        let home = std::env::var_os("HOME");
-        let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        let appdata = std::env::var_os("APPDATA");
-        let previous_token = std::env::var_os("PEBBLEHOST_API_KEY");
+        let _environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _environment = EnvironmentRestore::capture(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "APPDATA",
+            "PEBBLEHOST_API_KEY",
+        ]);
 
         std::env::remove_var("HOME");
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("APPDATA");
         std::env::set_var("PEBBLEHOST_API_KEY", "environment");
 
-        let result = resolve_token();
-
-        if let Some(value) = home {
-            std::env::set_var("HOME", value);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(value) = xdg_config_home {
-            std::env::set_var("XDG_CONFIG_HOME", value);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        if let Some(value) = appdata {
-            std::env::set_var("APPDATA", value);
-        } else {
-            std::env::remove_var("APPDATA");
-        }
-        if let Some(value) = previous_token {
-            std::env::set_var("PEBBLEHOST_API_KEY", value);
-        } else {
-            std::env::remove_var("PEBBLEHOST_API_KEY");
-        }
-
-        assert_eq!(result.unwrap(), "environment");
+        assert_eq!(resolve_token().unwrap(), "environment");
     }
 
     #[test]
@@ -1279,6 +1390,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_resolves_api_key_from_environment() {
+        let _environment_lock = ENVIRONMENT_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _environment = EnvironmentRestore::capture(&["PEBBLEHOST_API_KEY"]);
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/client"))
@@ -1303,7 +1418,6 @@ mod tests {
             assert!(matches!(run(cli_for()).await, Err(CliError::MissingToken)));
         }
 
-        std::env::remove_var("PEBBLEHOST_API_KEY");
         assert!(matches!(run(cli_for()).await, Err(CliError::MissingToken)));
     }
 

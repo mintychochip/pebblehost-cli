@@ -42,7 +42,7 @@ Mirror the existing commit history. Common prefixes include:
 ## Pull request process
 
 1. Open a pull request against the `master` branch.
-2. Make sure the `Lint and Test` workflow passes.
+2. Make sure the `Build` workflow passes.
 3. Link any related issue in the PR description.
 4. Request a review and respond to feedback.
 

@@ -741,6 +741,7 @@ name = "pebblehost-cli"
 version = "2026.8.27+23"
 dependencies = [
  "clap",
+ "libc",
  "reqwest",
  "rpassword",
  "serde",
@@ -749,6 +750,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+ "windows-sys 0.61.2",
  "wiremock",
 ]
 
