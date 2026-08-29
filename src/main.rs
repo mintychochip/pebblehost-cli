@@ -624,19 +624,10 @@ fn preserve_credential_temporary_after_recovery_failure(
     temporary_path: &Path,
     path: &Path,
 ) -> bool {
-    let destination = credential_entry_is_present(path);
-    let temporary = credential_entry_is_present(temporary_path);
-    match (destination, temporary) {
-        // A present destination may be the successfully installed
-        // replacement; never remove it, and clean only the separate temp.
-        (Ok(true), _) => false,
-        (Ok(false), Ok(true)) => true,
-        (Ok(false), Ok(false)) => false,
-        // If the destination is not confirmed present and either inspection
-        // is inconclusive, retain the replacement rather than risk deleting
-        // the only copy of the credential.
-        _ => true,
-    }
+    matches!(
+        (credential_entry_is_present(path), credential_entry_is_present(temporary_path)),
+        (Ok(false), Ok(true))
+    )
 }
 
 
