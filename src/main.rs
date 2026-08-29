@@ -625,11 +625,13 @@ fn preserve_credential_temporary_after_recovery_failure(
     path: &Path,
 ) -> bool {
     matches!(
-        (credential_entry_is_present(path), credential_entry_is_present(temporary_path)),
+        (
+            credential_entry_is_present(path),
+            credential_entry_is_present(temporary_path)
+        ),
         (Ok(false), Ok(true))
     )
 }
-
 
 #[cfg(windows)]
 fn recover_credential_replacement(
@@ -638,9 +640,7 @@ fn recover_credential_replacement(
 ) -> Result<(), CredentialReplacementError> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_WRITE_THROUGH,
-    };
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
     let path_as_wide = |path: &Path| {
         path.as_os_str()
@@ -674,12 +674,11 @@ fn replace_credential_file(
 ) -> Result<(), CredentialReplacementError> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{
-        GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
-        ERROR_UNABLE_TO_MOVE_REPLACEMENT, ERROR_UNABLE_TO_MOVE_REPLACEMENT_2,
+        GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_UNABLE_TO_MOVE_REPLACEMENT,
+        ERROR_UNABLE_TO_MOVE_REPLACEMENT_2,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH,
-        REPLACEFILE_WRITE_THROUGH,
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
     };
 
     let path_as_wide = |path: &Path| {
@@ -749,7 +748,6 @@ fn replace_credential_file(
     let move_error = unsafe { GetLastError() };
     Err(credential_replacement_error(move_error, false))
 }
-
 
 fn existing_credential(path: &Path) -> Result<bool, CliError> {
     let metadata = match fs::symlink_metadata(path) {
@@ -1331,7 +1329,6 @@ mod tests {
         assert_eq!(load_stored_token(&path).unwrap(), Some("secret".into()));
         assert!(path.parent().unwrap().is_dir());
     }
-
 
     #[cfg(unix)]
     #[test]
