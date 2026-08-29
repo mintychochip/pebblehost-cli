@@ -56,6 +56,7 @@ struct Cli {
 #[allow(clippy::enum_variant_names)]
 enum Command {
     Login,
+    Logout,
     Account,
     Servers,
     Server(ServerId),
@@ -263,6 +264,7 @@ async fn operations() -> Result<Response, CliError> {
 async fn execute(api: &Api, command: Command) -> Result<Response, CliError> {
     match command {
         Command::Login => unreachable!("login is handled before API-key resolution"),
+        Command::Logout => unreachable!("logout is handled before API-key resolution"),
         Command::Account => {
             api.request(Method::GET, "/api/client/account", &[], None)
                 .await
@@ -775,6 +777,31 @@ fn existing_credential(path: &Path) -> Result<bool, CliError> {
     validate_credential_metadata(path, &metadata)?;
     Ok(true)
 }
+fn logout_stored_token(path: &Path, environment_override: bool) -> Result<Response, CliError> {
+    let removed = if existing_credential(path)? {
+        match fs::remove_file(path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(CliError::Credential(format!(
+                    "cannot remove credential file: {error}"
+                )))
+            }
+        }
+    } else {
+        false
+    };
+
+    let mut message = if removed {
+        "Saved API key removed.".to_owned()
+    } else {
+        "No saved API key found.".to_owned()
+    };
+    if environment_override {
+        message.push_str(" PEBBLEHOST_API_KEY remains set and active.");
+    }
+    Ok(Response::Text(message))
+}
 
 fn open_credential(path: &Path) -> Result<Option<std::fs::File>, CliError> {
     let mut options = OpenOptions::new();
@@ -1033,6 +1060,11 @@ async fn run(cli: Cli) -> Result<Response, CliError> {
     if matches!(cli.command, Command::Login) {
         return login(&cli.base_url).await;
     }
+    if matches!(cli.command, Command::Logout) {
+        let path = credential_path()
+            .ok_or_else(|| CliError::Credential("cannot determine credential path".into()))?;
+        return logout_stored_token(&path, std::env::var_os("PEBBLEHOST_API_KEY").is_some());
+    }
     if matches!(cli.command, Command::Operations) {
         return operations().await;
     }
@@ -1226,7 +1258,7 @@ fn maybe_show_version_reminder(json: bool, command: &Command) {
     if json {
         return;
     }
-    if matches!(command, Command::Login | Command::Update) {
+    if matches!(command, Command::Login | Command::Logout | Command::Update) {
         return;
     }
     let Some(path) = version_reminder_path() else {
@@ -1346,6 +1378,44 @@ mod tests {
         save_stored_token(&path, "secret").unwrap();
 
         assert_eq!(load_stored_token(&path).unwrap(), Some("secret".into()));
+    }
+    #[test]
+    fn logout_removes_saved_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        save_stored_token(&path, "secret").unwrap();
+
+        let response = logout_stored_token(&path, false).unwrap();
+
+        assert_eq!(response, Response::Text("Saved API key removed.".into()));
+        assert!(!path.exists());
+    }
+    #[test]
+    fn logout_is_idempotent_without_saved_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+
+        let response = logout_stored_token(&path, false).unwrap();
+
+        assert_eq!(response, Response::Text("No saved API key found.".into()));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn logout_reports_active_environment_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-key");
+        save_stored_token(&path, "secret").unwrap();
+
+        let response = logout_stored_token(&path, true).unwrap();
+
+        assert_eq!(
+            response,
+            Response::Text(
+                "Saved API key removed. PEBBLEHOST_API_KEY remains set and active.".into()
+            )
+        );
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1506,6 +1576,36 @@ mod tests {
     fn login_command_parses_without_credentials() {
         let cli = Cli::try_parse_from(["pb", "login"]).unwrap();
         assert!(matches!(cli.command, Command::Login));
+    }
+    #[test]
+    fn logout_command_parses_without_credentials() {
+        let cli = Cli::try_parse_from(["pb", "logout"]).unwrap();
+        assert!(matches!(cli.command, Command::Logout));
+    }
+
+    #[tokio::test]
+    async fn logout_command_removes_saved_key_without_authentication() {
+        let _environment_lock = ENVIRONMENT_LOCK.lock().await;
+        let _environment = EnvironmentRestore::capture(&[
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "APPDATA",
+            "PEBBLEHOST_API_KEY",
+        ]);
+        let config = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", config.path());
+        std::env::set_var("XDG_CONFIG_HOME", config.path());
+        std::env::set_var("APPDATA", config.path());
+        std::env::remove_var("PEBBLEHOST_API_KEY");
+
+        let path = credential_path().unwrap();
+        save_stored_token(&path, "secret").unwrap();
+        let response = run(cli_with("http://unused".into(), Command::Logout))
+            .await
+            .unwrap();
+
+        assert_eq!(response, Response::Text("Saved API key removed.".into()));
+        assert!(!path.exists());
     }
 
     #[tokio::test]

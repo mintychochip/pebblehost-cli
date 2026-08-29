@@ -103,6 +103,11 @@ is stored in the per-user CLI config and is used by authenticated commands.
 Browser launch is best-effort. The API key is never printed and is not accepted
 as a command-line argument.
 
+### Logout
+
+Run `pb logout` to remove the API key saved in the local CLI config. If
+`PEBBLEHOST_API_KEY` is set, it remains active for the current environment.
+
 Use `--base-url` to point at a different panel.
 
 The implementation follows the published OpenAPI document at https://api.pebblehost.com/api.yaml and uses documented bearer-token authentication.
