@@ -11,7 +11,9 @@ on:
 
 permissions:
   contents: write
-
+  pull-requests: write
+  actions: write
+  checks: read
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -134,18 +136,61 @@ jobs:
           sed -i 's/^version = .*/version = "${{ steps.version.outputs.cargo_version }}"/' Cargo.toml
           cargo update -p pebblehost-cli
 
-      - name: Commit version bump
+      - name: Commit version bump through pull request
         id: commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git add Cargo.toml Cargo.lock
           git commit -m "release: ${{ steps.version.outputs.tag }} [skip ci]" || true
-          branch="${GITHUB_REF#refs/heads/}"
-          git push origin "HEAD:${branch}"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          base_branch="${GITHUB_REF#refs/heads/}"
+          release_branch="release/${{ steps.version.outputs.tag }}"
+          git switch -c "$release_branch"
+          git push --set-upstream origin "$release_branch"
+
+          pr_url=$(gh pr create \
+            --base "$base_branch" \
+            --head "$release_branch" \
+            --title "Release ${{ steps.version.outputs.tag }}" \
+            --body "Automated version bump for ${{ steps.version.outputs.tag }}.")
+          pr_number=$(gh pr view "$pr_url" --json number --jq '.number')
+          version_sha=$(git rev-parse HEAD)
+
+          gh workflow run build.yml --ref "$release_branch"
+
+          run_id=""
+          for _ in $(seq 1 60); do
+            run_id=$(gh run list \
+              --workflow build.yml \
+              --branch "$release_branch" \
+              --limit 20 \
+              --json databaseId,headSha,event \
+              --jq ".[] | select(.headSha == \"${version_sha}\" and .event == \"workflow_dispatch\") | .databaseId" \
+              | sed -n '1p')
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "$run_id" ]; then
+            echo "Build workflow did not start for ${release_branch}" >&2
+            exit 1
+          fi
+
+          gh run watch "$run_id" --exit-status
+          gh pr merge "$pr_number" --squash --delete-branch
+          sha=$(gh pr view "$pr_number" --json mergeCommit --jq '.mergeCommit.oid')
+          if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+            echo "Pull request ${pr_number} did not produce a merge commit" >&2
+            exit 1
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
       - name: Create and push tag
         run: |
-          git tag "${{ steps.version.outputs.tag }}"
+          base_branch="${GITHUB_REF#refs/heads/}"
+          git fetch origin "$base_branch"
+          git tag "${{ steps.version.outputs.tag }}" "${{ steps.commit.outputs.sha }}"
           git push origin "${{ steps.version.outputs.tag }}"
 
   build:
