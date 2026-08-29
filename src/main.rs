@@ -1064,14 +1064,141 @@ fn sort_value(value: Value) -> Value {
     }
 }
 
+fn normalize_value(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(normalize_value).collect()),
+        Value::Object(mut map) => {
+            if let Some(data) = map.remove("data") {
+                let normalized = match data {
+                    Value::Array(items) => {
+                        Value::Array(items.into_iter().map(normalize_value).collect())
+                    }
+                    other => normalize_value(other),
+                };
+                let mut rest = map
+                    .into_iter()
+                    .map(|(key, value)| (key, normalize_value(value)))
+                    .collect::<serde_json::Map<String, Value>>();
+                rest.insert("data".to_owned(), normalized);
+                Value::Object(rest)
+            } else if let Some(attributes) = map.remove("attributes") {
+                match attributes {
+                    Value::Object(mut attrs) => {
+                        for (key, value) in map {
+                            attrs.insert(key, value);
+                        }
+                        Value::Object(
+                            attrs
+                                .into_iter()
+                                .map(|(key, value)| (key, normalize_value(value)))
+                                .collect(),
+                        )
+                    }
+                    other => {
+                        let mut rest = map
+                            .into_iter()
+                            .map(|(key, value)| (key, normalize_value(value)))
+                            .collect::<serde_json::Map<String, Value>>();
+                        rest.insert("attributes".to_owned(), normalize_value(other));
+                        Value::Object(rest)
+                    }
+                }
+            } else {
+                Value::Object(
+                    map.into_iter()
+                        .map(|(key, value)| (key, normalize_value(value)))
+                        .collect(),
+                )
+            }
+        }
+        other => other,
+    }
+}
+
+fn render_entry(out: &mut String, key: &str, child: &Value, key_indent: usize) {
+    out.push_str(key);
+    match child {
+        Value::Object(inner) if !inner.is_empty() => {
+            out.push_str(":\n");
+            render_value(out, child, key_indent + 1);
+        }
+        Value::Array(inner) if !inner.is_empty() => {
+            out.push_str(":\n");
+            render_array(out, inner, key_indent + 1);
+        }
+        _ => {
+            out.push_str(": ");
+            render_value(out, child, 0);
+            out.push('\n');
+        }
+    }
+}
+
+fn render_array(out: &mut String, items: &[Value], indent: usize) {
+    if items.is_empty() {
+        out.push_str("[ ]\n");
+        return;
+    }
+    for item in items {
+        if let Value::Object(map) = item {
+            if !map.is_empty() {
+                let pad = "  ".repeat(indent);
+                for (index, (key, child)) in map.iter().enumerate() {
+                    out.push_str(&pad);
+                    if index == 0 {
+                        out.push_str("- ");
+                    } else {
+                        out.push_str("  ");
+                    }
+                    render_entry(out, key, child, indent + 1);
+                }
+                continue;
+            }
+        }
+        let pad = "  ".repeat(indent);
+        out.push_str(&pad);
+        out.push_str("- ");
+        render_value(out, item, 0);
+        out.push('\n');
+    }
+}
+
+fn render_value(out: &mut String, value: &Value, indent: usize) {
+    match value {
+        Value::Object(map) => {
+            if map.is_empty() {
+                out.push_str("{ }");
+                return;
+            }
+            let pad = "  ".repeat(indent);
+            for (key, child) in map {
+                out.push_str(&pad);
+                render_entry(out, key, child, indent);
+            }
+        }
+        Value::Array(items) => render_array(out, items, indent),
+        Value::String(s) => out.push_str(s),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Null => out.push_str("null"),
+    }
+}
+
+fn render_text(value: &Value) -> String {
+    let mut out = String::new();
+    render_value(&mut out, value, 0);
+    out.trim_end_matches('\n').to_string()
+}
+
 fn format_response(response: Response, json: bool) -> String {
     match response {
         Response::Json(value) => {
-            let sorted = sort_value(value);
+            let normalized = normalize_value(value);
+            let sorted = sort_value(normalized);
             if json {
                 sorted.to_string()
             } else {
-                serde_json::to_string_pretty(&sorted).unwrap()
+                render_text(&sorted)
             }
         }
         Response::Text(text) => text,
@@ -1458,12 +1585,96 @@ mod tests {
 
         assert_eq!(output, r#"{"a":2,"z":1}"#);
     }
+    #[test]
+    fn default_response_format_renders_account_as_parsed_fields() {
+        let output = format_response(
+            Response::Json(json!({
+                "object": "user",
+                "attributes": {
+                    "id": null,
+                    "admin": false,
+                    "email": "user@example.com",
+                    "language": "en"
+                }
+            })),
+            false,
+        );
+
+        assert_eq!(
+            output,
+            "admin: false\nemail: user@example.com\nid: null\nlanguage: en\nobject: user"
+        );
+    }
 
     #[test]
-    fn default_response_format_remains_pretty_json() {
+    fn default_response_format_renders_list_items_as_parsed_fields() {
+        let output = format_response(
+            Response::Json(json!({
+                "object": "list",
+                "data": [
+                    {
+                        "object": "server",
+                        "attributes": {
+                            "name": "alpha",
+                            "uuid": "u-1"
+                        }
+                    }
+                ],
+                "meta": {
+                    "pagination": {
+                        "total": 1
+                    }
+                }
+            })),
+            false,
+        );
+
+        assert_eq!(
+            output,
+            "data:\n  - name: alpha\n    object: server\n    uuid: u-1\nmeta:\n  pagination:\n    total: 1\nobject: list"
+        );
+    }
+
+    #[test]
+    fn default_response_format_renders_parsed_text() {
         let output = format_response(Response::Json(json!({"z": 1, "a": 2})), false);
 
-        assert_eq!(output, "{\n  \"a\": 2,\n  \"z\": 1\n}");
+        assert_eq!(output, "a: 2\nz: 1");
+    }
+
+    #[test]
+    fn default_response_format_renders_nested_structures() {
+        let output = format_response(
+            Response::Json(json!({
+                "object": "list",
+                "data": [
+                    {"object": "server", "attributes": {"uuid": "u-2", "name": "zeta", "limits": {"cpu": 0, "memory": 512}}},
+                    {"object": "server", "attributes": {"uuid": "u-1", "name": "alpha"}}
+                ],
+                "meta": {"pagination": {"total": 2}}
+            })),
+            false,
+        );
+
+        assert_eq!(
+            output,
+            concat!(
+                "data:\n",
+                "  - limits:\n",
+                "      cpu: 0\n",
+                "      memory: 512\n",
+                "    name: zeta\n",
+                "    object: server\n",
+                "    uuid: u-2\n",
+                "  - name: alpha\n",
+                "    object: server\n",
+                "    uuid: u-1\n",
+                "meta:\n",
+                "  pagination:\n",
+                "    total: 2\n",
+                "object: list"
+            )
+        );
     }
 
     #[tokio::test]

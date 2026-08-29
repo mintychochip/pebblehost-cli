@@ -34,9 +34,20 @@ pb servers --verbose
 ```
 
 Both spellings print successful JSON responses as one sorted line without
-request metadata. The default remains pretty-printed JSON, and diagnostics
-continue to go to stderr.
-Non-JSON text responses, such as `file`, remain raw text.
+request metadata. The default output is parsed text rather than JSON:
+JSON:API `attributes` are unwrapped, list items are indented, and nested
+objects are rendered as `key: value` fields. For example, `pb account` prints:
+
+```text
+admin: false
+email: user@example.com
+id: null
+language: en
+object: user
+```
+
+Use `--json`/`--verbose` when another program needs JSON. Raw text responses,
+such as `file`, remain unchanged, and diagnostics continue to go to stderr.
 
 ## Install
 
