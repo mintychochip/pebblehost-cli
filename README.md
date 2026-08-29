@@ -1,6 +1,6 @@
 # PebbleHost CLI
 
-[![Build](https://github.com/mintychochip/pebblehost-cli/actions/workflows/build.yml/badge.svg)](https://github.com/mintychochip/pebblehost-cli/actions/workflows/build.yml)
+[![build](https://github.com/mintychochip/pebblehost-cli/actions/workflows/build.yml/badge.svg)](https://github.com/mintychochip/pebblehost-cli/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/mintychochip/pebblehost-cli?logo=github&label=release)](https://github.com/mintychochip/pebblehost-cli/releases)
 [![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-lightgrey)](https://github.com/mintychochip/pebblehost-cli/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
