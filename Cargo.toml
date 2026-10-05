@@ -1,6 +1,6 @@
 [package]
 name = "pebblehost-cli"
-version = "2026.8.29+29"
+version = "2026.10.5+67"
 edition = "2021"
 description = "CLI wrapper for the PebbleHost client API"
 license = "MIT"
